@@ -267,6 +267,192 @@ contract RCCStake is
         emit SetRCCPerBlock(_RCCPerBlock);
     }
 
+    /// 添加质押池
+    /// @param _stTokenAddress 质押币合约地址 
+    /// @param _poolWeight 质押权重
+    /// @param _minDepositAmount 最小质押数量
+    /// @param _unStakeLockedBlocks 解除质押锁定区块数
+    /// @param _withUpdate 是否更新
+    function addPool(address _stTokenAddress, uint256 _poolWeight,uint256 _minDepositAmount,uint256 _unStakeLockedBlocks,bool _withUpdate) public onlyRole(ADMIN_ROLE){
+        if(pool.length > 0){
+            require(_stTokenAddress != address(0x0),"invalid staking token address");
+        }else{
+            require(_stTokenAddress == address(0x0),"invalid staking token address");
+        }
+        require(_unStakeLockedBlocks > 0 ,"invalid min deposit amount");
+
+        require(block.number < endBlock,"Already ended");
+
+        if(_withUpdate){
+            //更新
+        }
+
+        uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
+
+        totalPoolWeight = totalPoolWeight + _poolWeight;
+        pool.push(Pool({
+            stTokenAddress : _stTokenAddress,
+            poolWeight : _poolWeight,
+            lastRewardBlock : lastRewardBlock,
+            accRCCPerST : 0,
+            stTokenAmount : 0,
+            minDepositAmount : _minDepositAmount,
+            unstakeLockedBlocks : _unStakeLockedBlocks
+        }));
+        
+        emit AddPool(_stTokenAddress,_poolWeight,lastRewardBlock,_minDepositAmount,_unStakeLockedBlocks);
+
+    }
+
+    function updatePool(uint256 _pid,uint256 _minDepositAmount,uint256 _unstakeLockedBlocks) public onlyRole(ADMIN_ROLE) checkPid(_pid) {
+        pool[_pid].minDepositAmount = _minDepositAmount;
+        pool[_pid].unstakeLockedBlocks = _unstakeLockedBlocks;
+    }
+
+    function setPoolWeight(uint256 _pid,uint256 _poolWeight,bool _withUpdate) public onlyRole(ADMIN_ROLE) checkPid(_pid){
+        require(_poolWeight > 0,"invalid pool weight");
+        if(_withUpdate){
+            //更新
+        }
+
+        totalPoolWeight = totalPoolWeight - pool[_id].poolWeight + _poolWeight;
+        pool[_id].poolWeight = _poolWeight;
+
+    }
+
+    //********************************************** QUERY FUNCTION ***************************
+
+
+    function poolLength() external view returns(uint256) {
+        return pool.length;
+    }
+
+    /// 计算奖励
+    /// @param _from 开始块 
+    /// @param _to 结束块
+    function getMultiplier(uint256 _from, uint256 _to) public view returns(uint256 multiplier){
+        require(_to >= _from,"invalid block range");
+        if(_from < startBlock){
+            _from = startBlock;
+            
+        }
+
+        if(_to>= endBlock){
+            _to = endBlock;
+        }
+
+        require(_from < _to,"end block must be greater than start block");
+        bool success;
+        (success,multiplier) = (_to - _from).tryMul(RCCPerBlock);
+        require(success,"multiplier overflow");
+    }
+
+    function pendingRCC(uint256 _pid,address _user) external checkPid(_pid) view returns(uint256){
+        return pendingRCCByBlockNumber(_pid,_user,block.number);
+    }
+
+    /// 获取用户的待领取收益
+    /// @param _pid 
+    /// @param _user 
+    /// @param _blockNumber 
+    function pendingRCCByBlockNumber(uint256 _pid,address _user,uint256 _blockNumber) public checkPid(_pid) view returns(uint256){
+        Pool storage pool_ = pool[_pid];
+        User storage user_ = user[_pid][_user];
+        uint256 accRccPerST = pool_.accRCCPerST;
+        uint256 stSupply = pool_.stTokenAmount;
+
+        if(_blockNumber > pool_.lastRewardBlock && stSupply != 0){
+            uint256 multiplier = getMultiplier(pool_.lastRewardBlock,_blockNumber);
+            uint256 RCCForPool = multiplier * pool_.poolWeight / totalPoolWeight;
+            accRCCPerST = accRCCPerST + RCCForPool * (1 ether) / stSupply;
+        }
+
+        return user_.stAmount * accRCCPerST / (1 ether) - user_.finishedRCC + user_.pendingRCC;
+    }
+
+
+    function stakingBalance(uint256 _pid,uint256 _user) external checkPid(_pid) view returns(uint256){
+        return user[_pid][_user].stAmount;
+    }
+
+    function withdrawAmount(uint256 _pid,address _user) public checkPid(_pid) view returns(uint256 requestAmount,uint256 pendingWithdrawAmount){
+        User storage user_ = user[_pid][_user];
+        for(uint256 i=0;i<user_.requests.length;i++){
+            //解除质押到期
+            if(user_.requests[i].unlockBlocks <= block.number){
+                pendingWithdrawAmount = pendingWithdrawAmount + user_.requests[i].amount;
+            }
+        }
+    }
+
+
+
+    //********************************************** PUBLIC FUNCTION ***************************
+
+    function updatePool(uint256 _pid) public checkPid(_pid) {
+        Pool storage pool_ = pool[_pid];
+        if(block.number <= pool_.lastRewardBlock){
+            return;
+        }
+
+        (bool success1,uint256 totalRCC) = getMultiplier(pool_.lastRewordBlock,block.number).tryMul(pool_.poolWeight);
+        require(success1,"totalRCC mul poolWeight overflow");
+
+        (success1,totalRCC) = totalRCC.tryDiv(totalPoolWeight);
+        require(success1, "totalRCC div totalPoolWeight overflow");
+
+        uint256 stSupply = pool_.stTokenAmount;
+        if(stSupply > 0){
+            //单位从eth 换成 wei
+            (bool success2, uint256 totalRCC_) = totalRCC.tryMul(1 ether);
+            require(success2, "totalRCC_ mul 1 ether overflow");
+
+            (success2, totalRCC_) = totalRCC_.tryDiv(stSupply);
+            require(success2, "totalRCC div stSupply overflow");
+
+            (bool success3, uint256 accRCCPerST) = pool_.accRCCPerST.tryAdd(totalRCC_);
+            require(success3, "pool accRCCPerST overflow");
+            pool_.accRCCPerST = accRCCPerST;
+            
+        }
+        pool_.lastRewordBlock = block.number;
+        emit UpdatePool(_pid, pool_.lastRewardBlock, totalRCC);
+
+
+    }
+
+    function massUpdatePools() public {
+        uint256 length = pool.length;
+        for(uint256 i =0;i<length;i++){
+            updatePool(i);
+        }
+    }
+
+    function depositNativeCurrency() public whenNotPaused() payable{
+        Pool storage pool_ = pool[nativeCurrency_PID];
+        require(pool_.stTokenAdress == address(0x0),"invalid staking token address");
+
+        uint256 _amount = msg.value;
+
+        require(_amount >= pool_.minDepositAmount,"deposit amount is too small");
+        _deposit(nativeCurrency_PID,_amount);
+    }
+
+    function depoist(uint256 _pid,uint256 _amount) public whenNotPaused() checkPid(_pid){
+        require(_pid != 0, "deposit not support nativeCurrency staking");
+        Pool storage pool_ = pool[_pid];
+        require(_amount > pool_.minDepositAmount ,"depoist amount is too small");
+        if(_amount > 0){
+            IERC20(pool_.stTokenAdress).safeTransferFrom(msg.sender,address(this),_amount);
+        }
+
+        _deposit(_pid,amount);
+
+
+    }
+
+
+
 
     
 
