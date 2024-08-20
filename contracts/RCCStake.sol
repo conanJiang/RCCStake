@@ -178,7 +178,7 @@ contract RCCStake is
         require(!withdrawPaused, "withdraw is paused");
         _;
     }
-
+    //_RCC = 0x8B901A752B374D26aFddd2c4b57334Fd51693EeA
     function initialize(
         IERC20 _RCC,
         uint256 _startBlock,
